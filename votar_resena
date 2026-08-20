@@ -1,0 +1,102 @@
+
+<?php
+/**
+ * ============================================================
+ * API: VOTAR RESEÑA COMO ÚTIL
+ * ============================================================
+ *
+ * Permite a usuarios logueados marcar una reseña como útil.
+ * Un usuario solo puede votar una vez por reseña.
+ */
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+require_once __DIR__ . '/../includes/conexion.php';
+require_once __DIR__ . '/../includes/csrf.php';
+require_once __DIR__ . '/../includes/resenas_helpers.php';
+
+header('Content-Type: application/json; charset=utf-8');
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    resenas_json(['ok' => false, 'mensaje' => 'Método no permitido.'], 405);
+}
+
+if (empty($_SESSION['id_usuario'])) {
+    resenas_json(['ok' => false, 'mensaje' => 'Debes iniciar sesión para votar.'], 401);
+}
+
+$idUsuario = (int)$_SESSION['id_usuario'];
+$csrfToken = $_POST['csrf_token'] ?? '';
+
+if (!csrf_verify($csrfToken)) {
+    resenas_json(['ok' => false, 'mensaje' => 'Token de seguridad inválido.'], 403);
+}
+
+$idResena = isset($_POST['id_resena']) ? (int)$_POST['id_resena'] : 0;
+
+if ($idResena <= 0) {
+    resenas_json(['ok' => false, 'mensaje' => 'Reseña inválida.'], 400);
+}
+
+// Verificar que la reseña existe y está aprobada
+$stmt = $conn->prepare("SELECT id_resena, id_usuario, votos_utiles FROM resenas WHERE id_resena = ? AND estado = 'aprobada' LIMIT 1");
+$stmt->bind_param('i', $idResena);
+$stmt->execute();
+$resena = $stmt->get_result()->fetch_assoc();
+$stmt->close();
+
+if (!$resena) {
+    resenas_json(['ok' => false, 'mensaje' => 'Reseña no encontrada.'], 404);
+}
+
+// No permitir votar la propia reseña
+if ((int)$resena['id_usuario'] === $idUsuario) {
+    resenas_json(['ok' => false, 'mensaje' => 'No puedes votar tu propia reseña.'], 403);
+}
+
+// Verificar si ya votó
+$stmt = $conn->prepare('SELECT id_voto FROM resenas_votos WHERE id_resena = ? AND id_usuario = ? LIMIT 1');
+$stmt->bind_param('ii', $idResena, $idUsuario);
+$stmt->execute();
+$yaVoto = $stmt->get_result()->num_rows > 0;
+$stmt->close();
+
+if ($yaVoto) {
+    resenas_json([
+        'ok'          => true,
+        'mensaje'     => 'Ya marcaste esta reseña como útil.',
+        'votos_utiles'=> (int)$resena['votos_utiles'],
+        'voto_usuario'=> true,
+    ]);
+}
+
+// Registrar voto e incrementar contador
+$conn->begin_transaction();
+
+try {
+    $stmt = $conn->prepare('INSERT INTO resenas_votos (id_resena, id_usuario) VALUES (?, ?)');
+    $stmt->bind_param('ii', $idResena, $idUsuario);
+    $stmt->execute();
+    $stmt->close();
+
+    $stmt = $conn->prepare('UPDATE resenas SET votos_utiles = votos_utiles + 1 WHERE id_resena = ?');
+    $stmt->bind_param('i', $idResena);
+    $stmt->execute();
+    $stmt->close();
+
+    $conn->commit();
+} catch (Exception $e) {
+    $conn->rollback();
+    resenas_json(['ok' => false, 'mensaje' => 'No se pudo registrar el voto.'], 500);
+}
+
+$nuevosVotos = (int)$resena['votos_utiles'] + 1;
+
+resenas_json([
+    'ok'           => true,
+    'mensaje'      => '¡Gracias por tu voto!',
+    'votos_utiles' => $nuevosVotos,
+    'voto_usuario' => true,
+]);
